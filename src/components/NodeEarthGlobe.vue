@@ -14,7 +14,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import { getApiAssetUrl } from '@/utils/api'
-import { getCoordByCode, getCountryCodeFromRegion } from '@/utils/geoHelper'
+import { getCoordByCode, resolveNodeLocation } from '@/utils/geoHelper'
 import { formatBytesPerSecondSplit } from '@/utils/helper'
 
 const props = defineProps<{
@@ -95,6 +95,8 @@ function getCappedDpr(): number {
 }
 
 interface RegionCluster {
+  /** 聚合键：国家代码，或配了精确位置时的 `国家@纬度,经度` */
+  key: string
   code: string
   coord: [number, number]
   servers: number
@@ -102,7 +104,7 @@ interface RegionCluster {
 }
 
 function clusterKey(c: RegionCluster) {
-  return `${c.code}:${c.servers}:${c.onlineServers}`
+  return `${c.key}:${c.servers}:${c.onlineServers}`
 }
 
 interface RegionRate {
@@ -110,21 +112,18 @@ interface RegionRate {
   down: number
 }
 
-// 节点按地区聚合
+// 节点按位置聚合：主题设置 nodeLocations 里配了坐标的按坐标，否则按国家
 const regionClusters = computed<RegionCluster[]>(() => {
   const map = new Map<string, RegionCluster>()
   for (const node of displayNodes.value) {
-    const code = getCountryCodeFromRegion(node.region)
-    if (!code)
-      continue
-    const coord = getCoordByCode(code)
-    if (!coord)
+    const loc = resolveNodeLocation(node, appStore.nodeLocations)
+    if (!loc)
       continue
 
-    let entry = map.get(code)
+    let entry = map.get(loc.key)
     if (!entry) {
-      entry = { code, coord, servers: 0, onlineServers: 0 }
-      map.set(code, entry)
+      entry = { key: loc.key, code: loc.code, coord: loc.coord, servers: 0, onlineServers: 0 }
+      map.set(loc.key, entry)
     }
     entry.servers += 1
     if (node.online)
@@ -139,13 +138,13 @@ const regionRates = computed<Map<string, RegionRate>>(() => {
   for (const node of nodesStore.nodes) {
     if (!node.online)
       continue
-    const code = getCountryCodeFromRegion(node.region)
-    if (!code)
+    const loc = resolveNodeLocation(node, appStore.nodeLocations)
+    if (!loc)
       continue
-    let entry = map.get(code)
+    let entry = map.get(loc.key)
     if (!entry) {
       entry = { up: 0, down: 0 }
-      map.set(code, entry)
+      map.set(loc.key, entry)
     }
     entry.up += node.net_out || 0
     entry.down += node.net_in || 0
@@ -217,19 +216,19 @@ function syncClusterOverlayPosition(cluster: RegionCluster, el: HTMLDivElement) 
 
 function syncClusterOverlayPositions() {
   for (const cluster of regionClusters.value) {
-    const el = clusterOverlayEls.get(cluster.code)
+    const el = clusterOverlayEls.get(cluster.key)
     if (!el)
       continue
     syncClusterOverlayPosition(cluster, el)
   }
 }
 
-function setClusterOverlayEl(code: string, el: Element | ComponentPublicInstance | null) {
+function setClusterOverlayEl(key: string, el: Element | ComponentPublicInstance | null) {
   if (el instanceof HTMLDivElement) {
     el.style.willChange = 'transform, opacity, filter'
-    clusterOverlayEls.set(code, el)
+    clusterOverlayEls.set(key, el)
 
-    const cluster = regionClusters.value.find(item => item.code === code)
+    const cluster = regionClusters.value.find(item => item.key === key)
     if (cluster) {
       syncClusterOverlayPosition(cluster, el)
     }
@@ -240,16 +239,16 @@ function setClusterOverlayEl(code: string, el: Element | ComponentPublicInstance
     return
   }
 
-  clusterOverlayEls.delete(code)
+  clusterOverlayEls.delete(key)
 }
 
-function bindClusterOverlayRef(code: string): (el: Element | ComponentPublicInstance | null) => void {
-  const existingBinder = clusterOverlayRefBinders.get(code)
+function bindClusterOverlayRef(key: string): (el: Element | ComponentPublicInstance | null) => void {
+  const existingBinder = clusterOverlayRefBinders.get(key)
   if (existingBinder)
     return existingBinder
 
-  const binder = (el: Element | ComponentPublicInstance | null) => setClusterOverlayEl(code, el)
-  clusterOverlayRefBinders.set(code, binder)
+  const binder = (el: Element | ComponentPublicInstance | null) => setClusterOverlayEl(key, el)
+  clusterOverlayRefBinders.set(key, binder)
   return binder
 }
 
@@ -484,8 +483,8 @@ const totalServers = computed(() => displayNodes.value.length)
 const onlineServers = computed(() => displayNodes.value.filter(node => node.online).length)
 const offlineServers = computed(() => totalServers.value - onlineServers.value)
 
-function rateFor(code: string): RegionRate {
-  return regionRates.value.get(code) ?? { up: 0, down: 0 }
+function rateFor(key: string): RegionRate {
+  return regionRates.value.get(key) ?? { up: 0, down: 0 }
 }
 
 function formatRate(bytesPerSec: number): string {
@@ -502,21 +501,22 @@ function formatRate(bytesPerSec: number): string {
       @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp"
     />
 
-    <template v-for="cluster in regionClusters" :key="cluster.code">
+    <template v-for="cluster in regionClusters" :key="cluster.key">
       <div
-        :ref="bindClusterOverlayRef(cluster.code)"
+        :ref="bindClusterOverlayRef(cluster.key)"
         class="absolute -top-7.5 left-0 pointer-events-none rounded backdrop-blur transition-[opacity,filter] duration-500"
       >
         <img
+          v-if="cluster.code"
           :src="getApiAssetUrl(`flags/${cluster.code.toLowerCase()}.svg`)" :alt="cluster.code"
           class="size-4 block absolute -bottom-2 -left-2 z-1 drop-shadow-[0_0_2px_rgba(0,0,0,0.1)]"
         >
         <div class="relative z-2 bg-background/60 rounded py-0.5 px-1 text-xs zoom-80 items-start justify-center text-nowrap">
           <div class="text-green-600 flex flex-row items-center gap-0.5">
-            <Icon icon="tabler:chevron-up" width="12" height="12" /> {{ formatRate(rateFor(cluster.code).up) }}
+            <Icon icon="tabler:chevron-up" width="12" height="12" /> {{ formatRate(rateFor(cluster.key).up) }}
           </div>
           <div class="text-blue-600 flex flex-row items-center gap-0.5">
-            <Icon icon="tabler:chevron-down" width="12" height="12" /> {{ formatRate(rateFor(cluster.code).down) }}
+            <Icon icon="tabler:chevron-down" width="12" height="12" /> {{ formatRate(rateFor(cluster.key).down) }}
           </div>
         </div>
       </div>

@@ -1,6 +1,8 @@
 import type { CurrencyCode } from '@/utils/financeHelper'
+import type { NodeLocations } from '@/utils/geoHelper'
 import type { Client, NodeStatus, NodeStatusPing, PingRecord, PingWindowPoint, StatusRecord } from '@/utils/rpc'
 import { isSupportedCurrency, normalizedCurrencyMap } from '@/utils/financeHelper'
+import { parseNodeLocations } from '@/utils/geoHelper'
 import { requestTurnstileToken } from '@/utils/turnstile'
 
 const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
@@ -254,6 +256,8 @@ export interface ThemeSettings {
   darkBackgroundUrl: string
   backgroundBlur: number
   backgroundOverlay: number
+  /** 各节点在地球 / 地图上的精确位置，见 `parseNodeLocations` */
+  nodeLocations: NodeLocations
 }
 
 export interface PublicSettings {
@@ -386,6 +390,7 @@ const DEFAULT_THEME_SETTINGS: ThemeSettings = {
   darkBackgroundUrl: '',
   backgroundBlur: 0,
   backgroundOverlay: 0,
+  nodeLocations: {},
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -464,6 +469,7 @@ export function adaptThemeOptions(value: unknown): ThemeSettings {
     darkBackgroundUrl: themeString(options.darkBackgroundUrl, DEFAULT_THEME_SETTINGS.darkBackgroundUrl),
     backgroundBlur: themeNumber(options.backgroundBlur, DEFAULT_THEME_SETTINGS.backgroundBlur, 0, 100),
     backgroundOverlay: themeNumber(options.backgroundOverlay, DEFAULT_THEME_SETTINGS.backgroundOverlay, -100, 100),
+    nodeLocations: parseNodeLocations(options.nodeLocations),
   }
 }
 

@@ -256,6 +256,8 @@ export const COORD_MAP: Record<string, [number, number]> = {
 }
 
 const ISO_CODE_REGEX = /^[A-Z]{2}$/
+const LOCATION_LINE_SEPARATOR_REGEX = /[\n;；]+/
+const LOCATION_FIELD_SEPARATOR_REGEX = /[,，]/
 
 /**
  * 从节点 region 字段提取 ISO 2 字母代码。
@@ -287,4 +289,69 @@ export function getCoordByCode(code: string | null | undefined): [number, number
   if (!code)
     return null
   return COORD_MAP[code] ?? null
+}
+
+/** 主题设置 `nodeLocations` 解析后的单台位置：坐标 + 可选的城市名 */
+export interface NodeLocation {
+  coord: [number, number]
+  label: string
+}
+
+/** 键是节点 id 或名字（小写） */
+export type NodeLocations = Record<string, NodeLocation>
+
+/** 地球 / 地图上的一个落点：同一坐标的节点合并成一个 */
+export interface ResolvedNodeLocation {
+  /** 聚合用的键：没配位置时是国家代码，配了位置时是 `国家@纬度,经度` */
+  key: string
+  /** 国家代码，用于国旗和国家名 */
+  code: string
+  coord: [number, number]
+  /** 城市名，没配时为空 */
+  label: string
+}
+
+/**
+ * 解析主题设置里的 `nodeLocations`：每行（或用分号隔开）一台，
+ * `名字或id=纬度,经度[,城市名]`，例如 `USA-VPS=34.05,-118.24,洛杉矶`。
+ * 写错的行直接跳过。
+ */
+export function parseNodeLocations(value: unknown): NodeLocations {
+  const result: NodeLocations = {}
+  if (typeof value !== 'string')
+    return result
+  for (const raw of value.split(LOCATION_LINE_SEPARATOR_REGEX)) {
+    const line = raw.trim()
+    const eq = line.indexOf('=')
+    if (eq <= 0)
+      continue
+    const name = line.slice(0, eq).trim().toLowerCase()
+    const [latText, lngText, ...rest] = line.slice(eq + 1).split(LOCATION_FIELD_SEPARATOR_REGEX).map(part => part.trim())
+    const lat = Number(latText)
+    const lng = Number(lngText)
+    if (!name || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180)
+      continue
+    result[name] = { coord: [lat, lng], label: rest.join(',').trim() }
+  }
+  return result
+}
+
+/**
+ * 节点在地球 / 地图上的位置：`nodeLocations` 里按 id 或名字配了坐标就用它，
+ * 否则退回国家中心点。返回 null 表示无法定位。
+ */
+export function resolveNodeLocation(
+  node: { uuid: string, name: string, region: string },
+  locations: NodeLocations,
+): ResolvedNodeLocation | null {
+  const code = getCountryCodeFromRegion(node.region)
+  const custom = locations[String(node.uuid || '').toLowerCase()] ?? locations[String(node.name || '').toLowerCase()]
+  if (custom) {
+    const [lat, lng] = custom.coord
+    return { key: `${code ?? 'XX'}@${lat.toFixed(2)},${lng.toFixed(2)}`, code: code ?? '', coord: custom.coord, label: custom.label }
+  }
+  if (!code)
+    return null
+  const coord = getCoordByCode(code)
+  return coord ? { key: code, code, coord, label: '' } : null
 }

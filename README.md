@@ -77,6 +77,12 @@
       "description": "earth：自转地球；earth-stop：静止地球；maps：点状地图；cards：仅显示头部卡片；hide：隐藏整个头部"
     },
     {
+      "key": "nodeLocations",
+      "value": "",
+      "options": "",
+      "description": "可选，节点在地球/地图上的精确位置。每台一条，用分号或换行隔开：名字或id=纬度,经度[,城市名]，例如 USA-VPS=34.05,-118.24,洛杉矶；没配的节点仍按国家中心点显示，同一坐标的节点合并成一个点"
+    },
+    {
       "key": "visitorInfoCardEnabled",
       "value": "true",
       "options": "",

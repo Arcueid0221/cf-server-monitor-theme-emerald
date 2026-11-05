@@ -1,4 +1,5 @@
 import type { EarthViewMode, NodeViewMode, PublicSettings, ThemeMode } from '@/utils/api'
+import type { NodeLocations } from '@/utils/geoHelper'
 import type { ByteDecimalsConfig } from '@/utils/helper'
 import { usePreferredDark, useStorageAsync } from '@vueuse/core'
 import { defineStore } from 'pinia'
@@ -98,6 +99,10 @@ const useAppStore = defineStore('app', () => {
 
   const earthViewMode = computed<EarthViewMode>(() => {
     return publicSettings.value?.themeSettings.earthViewMode ?? 'earth'
+  })
+
+  const nodeLocations = computed<NodeLocations>(() => {
+    return publicSettings.value?.themeSettings.nodeLocations ?? {}
   })
 
   const visitorInfoCardEnabled = computed<boolean>(() => {
@@ -278,6 +283,7 @@ const useAppStore = defineStore('app', () => {
     alertTitle,
     alertContent,
     earthViewMode,
+    nodeLocations,
     visitorInfoCardEnabled,
     visitorCountryCode,
     hideAdminEntryWhenLoggedOut,

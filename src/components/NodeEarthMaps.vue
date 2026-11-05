@@ -9,11 +9,13 @@ import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import { getApiAssetUrl } from '@/utils/api'
 import { ensureWorldMapRegistered } from '@/utils/echartsWorldMap'
-import { getCoordByCode, getCountryCodeFromRegion } from '@/utils/geoHelper'
+import { resolveNodeLocation } from '@/utils/geoHelper'
 import { getRegionDisplayName } from '@/utils/regionHelper'
 import '@/utils/echarts'
 
 interface EarthMapPoint {
+  /** 聚合键：国家代码，或配了精确位置时的 `国家@纬度,经度` */
+  key: string
   code: string
   name: string
   coord: [number, number]
@@ -45,27 +47,30 @@ function resolveCountryDisplayName(region: string, code: string): string {
   return regionDisplayNames?.of(code) ?? code
 }
 
+// 散点按位置聚合（主题设置 nodeLocations 里配了坐标的按坐标，否则按国家）
 const points = computed<EarthMapPoint[]>(() => {
   const map = new Map<string, EarthMapPoint>()
   for (const node of displayNodes.value) {
-    const code = getCountryCodeFromRegion(node.region)
-    if (!code)
+    const loc = resolveNodeLocation(node, appStore.nodeLocations)
+    if (!loc)
       continue
-    const coord = getCoordByCode(code)
-    if (!coord)
-      continue
-    const current = map.get(code)
+    const current = map.get(loc.key)
     if (!current) {
-      map.set(code, {
-        code,
-        name: resolveCountryDisplayName(node.region, code),
-        coord,
+      const country = loc.code ? resolveCountryDisplayName(node.region, loc.code) : ''
+      map.set(loc.key, {
+        key: loc.key,
+        code: loc.code,
+        name: [country, loc.label].filter(Boolean).join(' · ') || loc.label,
+        coord: loc.coord,
         online: node.online ? 1 : 0,
         offline: node.online ? 0 : 1,
         total: 1,
       })
       continue
     }
+    // 同一个点上前面的节点没写城市名时，用后面写了的
+    if (loc.label && !current.name.includes(loc.label))
+      current.name = [current.name, loc.label].filter(Boolean).join(' · ')
     current.total += 1
     current.online += node.online ? 1 : 0
     current.offline += node.online ? 0 : 1
@@ -94,7 +99,21 @@ const chartThemeColors = computed(() => ({
   tooltipShadow: appStore.isDark ? 'rgba(0, 0, 0, 0.4)' : 'rgba(0, 0, 0, 0.06)',
 }))
 
-const mapSeriesData = computed(() => points.value.map(point => ({
+// 国家填色：同一国家的几个散点合并成一块
+const countryPoints = computed(() => {
+  const map = new Map<string, { code: string, online: number, total: number }>()
+  for (const point of points.value) {
+    if (!point.code)
+      continue
+    const current = map.get(point.code) ?? { code: point.code, online: 0, total: 0 }
+    current.online += point.online
+    current.total += point.total
+    map.set(point.code, current)
+  }
+  return Array.from(map.values())
+})
+
+const mapSeriesData = computed(() => countryPoints.value.map(point => ({
   name: point.code,
   value: point.total,
   itemStyle: {
@@ -153,7 +172,7 @@ const chartOption = computed<EChartsOption>(() => ({
       const p = params as { name: string, data: { code: string, online: number, offline: number } }
       if (!p.data)
         return ''
-      const flag = `<img src="${getApiAssetUrl(`flags/${p.data.code.toLowerCase()}.svg`)}" style="width:16px;height:16px;vertical-align:middle;margin-right:2px;filter:drop-shadow(0 0 2px rgba(0,0,0,0.1))" />`
+      const flag = p.data.code ? `<img src="${getApiAssetUrl(`flags/${p.data.code.toLowerCase()}.svg`)}" style="width:16px;height:16px;vertical-align:middle;margin-right:2px;filter:drop-shadow(0 0 2px rgba(0,0,0,0.1))" />` : ''
       const dot = (color: string) => `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color}"></span>`
       const online = `<span style="display:flex;gap:4px;align-items:center">${dot(chartThemeColors.value.dotEmerald)} ${p.data.online}</span>`
       const offline = p.data.offline > 0 ? ` <span style="display:flex;gap:4px;align-items:center">${dot(chartThemeColors.value.dotYellow)} ${p.data.offline}</span>` : ''
@@ -252,7 +271,7 @@ onMounted(async () => {
   <div class="relative h-full border-none" content-class="h-full !p-0">
     <!-- 预加载国旗图片，避免 tooltip 重复请求 -->
     <div class="hidden">
-      <img v-for="point in points" :key="point.code" :src="getApiAssetUrl(`flags/${point.code.toLowerCase()}.svg`)">
+      <img v-for="point in countryPoints" :key="point.code" :src="getApiAssetUrl(`flags/${point.code.toLowerCase()}.svg`)">
     </div>
     <div class="relative flex h-88 flex-col items-center">
       <div

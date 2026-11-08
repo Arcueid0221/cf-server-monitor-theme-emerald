@@ -105,6 +105,8 @@ const useAppStore = defineStore('app', () => {
     return publicSettings.value?.themeSettings.nodeLocations ?? {}
   })
 
+  const headerLinks = computed(() => publicSettings.value?.themeSettings.headerLinks ?? [])
+
   const visitorInfoCardEnabled = computed<boolean>(() => {
     return publicSettings.value?.themeSettings.visitorInfoCardEnabled ?? true
   })
@@ -284,6 +286,7 @@ const useAppStore = defineStore('app', () => {
     alertContent,
     earthViewMode,
     nodeLocations,
+    headerLinks,
     visitorInfoCardEnabled,
     visitorCountryCode,
     hideAdminEntryWhenLoggedOut,

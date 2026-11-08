@@ -83,6 +83,12 @@
       "description": "可选，节点在地球/地图上的精确位置。每台一条，用分号或换行隔开：名字或id=纬度,经度[,城市名]，例如 USA-VPS=34.05,-118.24,洛杉矶；没配的节点仍按国家中心点显示，同一坐标的节点合并成一个点"
     },
     {
+      "key": "headerLinks",
+      "value": "",
+      "options": "",
+      "description": "可选，页头右上角的站点链接，用于切换到别的站。格式：名称=网址，多个用分号或换行隔开，例如 SIM 卡=https://sim.example.com；只接受 http/https 网址"
+    },
+    {
       "key": "visitorInfoCardEnabled",
       "value": "true",
       "options": "",

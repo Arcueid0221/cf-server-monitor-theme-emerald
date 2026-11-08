@@ -1,8 +1,10 @@
 import type { CurrencyCode } from '@/utils/financeHelper'
 import type { NodeLocations } from '@/utils/geoHelper'
+import type { HeaderLink } from '@/utils/headerLinks'
 import type { Client, NodeStatus, NodeStatusPing, PingRecord, PingWindowPoint, StatusRecord } from '@/utils/rpc'
 import { isSupportedCurrency, normalizedCurrencyMap } from '@/utils/financeHelper'
 import { parseNodeLocations } from '@/utils/geoHelper'
+import { parseHeaderLinks } from '@/utils/headerLinks'
 import { requestTurnstileToken } from '@/utils/turnstile'
 
 const ONLINE_THRESHOLD_MS = 5 * 60 * 1000
@@ -258,6 +260,8 @@ export interface ThemeSettings {
   backgroundOverlay: number
   /** 各节点在地球 / 地图上的精确位置，见 `parseNodeLocations` */
   nodeLocations: NodeLocations
+  /** 页头右上角的站点链接，见 `parseHeaderLinks` */
+  headerLinks: HeaderLink[]
 }
 
 export interface PublicSettings {
@@ -391,6 +395,7 @@ const DEFAULT_THEME_SETTINGS: ThemeSettings = {
   backgroundBlur: 0,
   backgroundOverlay: 0,
   nodeLocations: {},
+  headerLinks: [],
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -470,6 +475,7 @@ export function adaptThemeOptions(value: unknown): ThemeSettings {
     backgroundBlur: themeNumber(options.backgroundBlur, DEFAULT_THEME_SETTINGS.backgroundBlur, 0, 100),
     backgroundOverlay: themeNumber(options.backgroundOverlay, DEFAULT_THEME_SETTINGS.backgroundOverlay, -100, 100),
     nodeLocations: parseNodeLocations(options.nodeLocations),
+    headerLinks: parseHeaderLinks(options.headerLinks),
   }
 }
 

@@ -37,19 +37,13 @@ const shouldAutoRotate = computed(() => appStore.earthViewMode !== 'earth-stop')
 
 let globe: Globe | null = null
 const INITIAL_THETA = 0.22
-/** 不缩放时上下倾斜的上限（约 37°）；放大到最大时放宽到 ZOOMED_MAX_THETA（约 60°），方便把高纬度地区转到正中 */
-const BASE_MAX_THETA = 0.65
-const ZOOMED_MAX_THETA = 1.05
+const MIN_THETA = -0.65
+const MAX_THETA = 0.65
 const CHINA_COORD = getCoordByCode('CN') ?? [35.8617, 104.1954]
 const DEFAULT_PHI = normalizePhi(-Math.PI / 2 - CHINA_COORD[1] * Math.PI / 180)
 const GLOBE_RADIUS = 0.8
+const GLOBE_SCALE = 1
 const MARKER_ELEVATION = 0
-// 缩放：cobe 的 scale 参数放大地球本身，超出画布的部分被裁掉；标签投影用同一个倍数
-const MIN_ZOOM = 1
-const MAX_ZOOM = 4
-const ZOOM_BUTTON_STEP = 1.5
-const WHEEL_ZOOM_SENSITIVITY = 0.01
-const zoom = ref(MIN_ZOOM)
 let phi = DEFAULT_PHI
 let targetPhi = phi
 let theta = INITIAL_THETA
@@ -58,10 +52,6 @@ let isPointerDown = false
 let lastPointerX = 0
 let lastPointerY = 0
 let staticRedrawUntil = 0
-// 双指捏合：记录每个触点的位置，两指时按距离变化缩放
-const activePointers = new Map<number, { x: number, y: number }>()
-let pinchStartDistance = 0
-let pinchStartZoom = MIN_ZOOM
 
 function normalizePhi(value: number): number {
   const circle = Math.PI * 2
@@ -73,21 +63,9 @@ function normalizePhi(value: number): number {
   return next
 }
 
-function maxThetaForZoom(level: number): number {
-  const t = (level - MIN_ZOOM) / (MAX_ZOOM - MIN_ZOOM)
-  return BASE_MAX_THETA + (ZOOMED_MAX_THETA - BASE_MAX_THETA) * Math.min(Math.max(t, 0), 1)
-}
-
 function clampTheta(value: number): number {
-  const limit = maxThetaForZoom(zoom.value)
-  return Math.min(Math.max(value, -limit), limit)
+  return Math.min(Math.max(value, MIN_THETA), MAX_THETA)
 }
-
-function clampZoom(value: number): number {
-  return Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM)
-}
-
-const isZoomed = computed(() => zoom.value > MIN_ZOOM + 1e-3)
 
 function resetStoppedView() {
   phi = DEFAULT_PHI
@@ -228,16 +206,12 @@ function syncClusterOverlayPosition(cluster: RegionCluster, el: HTMLDivElement) 
     -sinPhi * cosTheta * x + sinTheta * y + cosPhi * cosTheta * z >= 0
     || screenX * screenX + screenY * screenY >= visibleThreshold
   )
-  const scale = zoom.value
-  const xPx = ((screenX / aspect) * scale + 1) * width / 2
-  const yPx = ((-screenY) * scale + 1) * height / 2
-  // 放大后转到画布外的标签也隐藏
-  const inside = xPx >= 0 && xPx <= width && yPx >= 0 && yPx <= height
-  const shown = visible && inside
+  const xPx = ((screenX / aspect) * GLOBE_SCALE + 1) * width / 2
+  const yPx = ((-screenY) * GLOBE_SCALE + 1) * height / 2
 
   el.style.transform = `translate3d(${xPx}px, ${yPx}px, 0)`
-  el.style.opacity = shown ? '1' : '0'
-  el.style.filter = shown ? 'blur(0px)' : 'blur(20px)'
+  el.style.opacity = visible ? '1' : '0'
+  el.style.filter = visible ? 'blur(0px)' : 'blur(20px)'
 }
 
 function syncClusterOverlayPositions() {
@@ -340,7 +314,6 @@ function buildInitialOptions(): COBEOptions {
     arcWidth: 0.8,
     arcHeight: 0.4,
     markerElevation: MARKER_ELEVATION,
-    scale: zoom.value,
   }
 }
 
@@ -348,7 +321,7 @@ function updateGlobeFrame() {
   if (!globe)
     return
   const { width, height } = getRenderSize()
-  globe.update({ phi, theta, width, height, scale: zoom.value })
+  globe.update({ phi, theta, width, height })
   syncClusterOverlayPositions()
 }
 
@@ -360,8 +333,7 @@ const { pause: pauseRaf, resume: resumeRaf } = useRafFn(
       return
     const prevPhi = phi
     const prevTheta = theta
-    // 放大时停止自转，方便盯着某个地区看
-    if (!isPointerDown && shouldAutoRotate.value && !isZoomed.value)
+    if (!isPointerDown && shouldAutoRotate.value)
       targetPhi += 0.002
     phi += (targetPhi - phi) * 1
     theta += (targetTheta - theta) * 1
@@ -382,7 +354,7 @@ function syncRafState() {
   if (!globe)
     return
 
-  if (shouldRender.value && ((shouldAutoRotate.value && !isZoomed.value) || isPointerDown)) {
+  if (shouldRender.value && (shouldAutoRotate.value || isPointerDown)) {
     resumeRaf()
     return
   }
@@ -481,52 +453,7 @@ watch(shouldRender, () => {
   syncRafState()
 })
 
-function setZoom(next: number) {
-  const clamped = clampZoom(next)
-  if (Math.abs(clamped - zoom.value) < 1e-4)
-    return
-  zoom.value = clamped
-  // 缩小时倾斜上限变小，当前角度要跟着收回来
-  targetTheta = clampTheta(targetTheta)
-  theta = clampTheta(theta)
-  updateGlobeFrame()
-  syncRafState()
-}
-
-function zoomIn() {
-  setZoom(zoom.value * ZOOM_BUTTON_STEP)
-}
-
-function zoomOut() {
-  setZoom(zoom.value / ZOOM_BUTTON_STEP)
-}
-
-function resetZoom() {
-  setZoom(MIN_ZOOM)
-}
-
-// 只在按住 ⌘/Ctrl 时缩放（Mac 触控板双指捏合在浏览器里也是 ctrlKey 的 wheel），
-// 普通滚轮照常滚动页面
-function onWheel(e: WheelEvent) {
-  if (!e.ctrlKey && !e.metaKey)
-    return
-  e.preventDefault()
-  setZoom(zoom.value * Math.exp(-e.deltaY * WHEEL_ZOOM_SENSITIVITY))
-}
-
-function pointerDistance(): number {
-  const [a, b] = Array.from(activePointers.values())
-  if (!a || !b)
-    return 0
-  return Math.hypot(a.x - b.x, a.y - b.y)
-}
-
 function onPointerDown(e: PointerEvent) {
-  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
-  if (activePointers.size === 2) {
-    pinchStartDistance = pointerDistance()
-    pinchStartZoom = zoom.value
-  }
   isPointerDown = true
   lastPointerX = e.clientX
   lastPointerY = e.clientY
@@ -535,39 +462,20 @@ function onPointerDown(e: PointerEvent) {
   syncRafState()
 }
 function onPointerMove(e: PointerEvent) {
-  if (activePointers.has(e.pointerId))
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
-  if (activePointers.size >= 2) {
-    // 两指时只缩放不旋转
-    if (pinchStartDistance > 0)
-      setZoom(pinchStartZoom * pointerDistance() / pinchStartDistance)
-    return
-  }
   if (!isPointerDown)
     return
   const deltaX = e.clientX - lastPointerX
   const deltaY = e.clientY - lastPointerY
   lastPointerX = e.clientX
   lastPointerY = e.clientY
-  // 放大后拖动按倍数变慢，便于对准小区域
-  targetPhi += deltaX / (200 * zoom.value)
-  targetTheta = clampTheta(targetTheta + deltaY / (300 * zoom.value))
+  targetPhi += deltaX / 200
+  targetTheta = clampTheta(targetTheta + deltaY / 300)
 }
 function onPointerUp(e: PointerEvent) {
-  activePointers.delete(e.pointerId)
-  if (activePointers.size < 2)
-    pinchStartDistance = 0
+  isPointerDown = false
   const target = e.currentTarget as HTMLElement
   if (target.hasPointerCapture(e.pointerId))
     target.releasePointerCapture(e.pointerId)
-  if (activePointers.size === 1) {
-    // 捏合结束剩一根手指：从它当前位置继续拖，避免跳一下
-    const [rest] = Array.from(activePointers.values())
-    lastPointerX = rest!.x
-    lastPointerY = rest!.y
-    return
-  }
-  isPointerDown = false
   syncRafState()
 }
 
@@ -586,7 +494,7 @@ function formatRate(bytesPerSec: number): string {
 </script>
 
 <template>
-  <div ref="containerRef" class="relative aspect-square w-full max-w-md mx-auto -translate-y-6 md:-translate-y-12" @wheel="onWheel">
+  <div ref="containerRef" class="relative aspect-square w-full max-w-md mx-auto -translate-y-6 md:-translate-y-12">
     <canvas
       ref="canvasRef"
       class="earth-globe-canvas absolute inset-0 w-full h-full select-none touch-none cursor-grab active:cursor-grabbing"
@@ -631,59 +539,11 @@ function formatRate(bytesPerSec: number): string {
         <span class="text-blue-600">{{ totalServers }}</span>
       </div> -->
     </div>
-
-    <div
-      class="absolute top-6 md:top-12 right-0 z-10 flex items-center gap-0.5 text-muted-foreground backdrop-blur-lg bg-background/60 rounded p-0.5"
-      title="放大/缩小地球（也可按住 ⌘ 或 Ctrl 滚动滚轮、触控板或手机双指捏合）"
-    >
-      <button
-        type="button" class="earth-zoom-btn" aria-label="放大地球"
-        :disabled="zoom >= MAX_ZOOM - 1e-3" @click="zoomIn"
-      >
-        <Icon icon="tabler:plus" width="12" height="12" />
-      </button>
-      <button
-        type="button" class="earth-zoom-btn" aria-label="缩小地球"
-        :disabled="!isZoomed" @click="zoomOut"
-      >
-        <Icon icon="tabler:minus" width="12" height="12" />
-      </button>
-      <button
-        v-if="isZoomed"
-        type="button" class="earth-zoom-btn text-[10px] tabular-nums px-1 w-auto" aria-label="还原地球大小"
-        @click="resetZoom"
-      >
-        {{ zoom.toFixed(1) }}×
-      </button>
-    </div>
   </div>
 </template>
 
 <style scoped>
 .earth-globe-canvas {
   contain: layout paint;
-}
-
-.earth-zoom-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.25rem;
-  height: 1.25rem;
-  border-radius: 0.2rem;
-  cursor: pointer;
-  transition:
-    background-color 150ms,
-    color 150ms;
-}
-
-.earth-zoom-btn:hover:not(:disabled) {
-  background-color: color-mix(in srgb, currentColor 15%, transparent);
-  color: var(--foreground, currentColor);
-}
-
-.earth-zoom-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
 }
 </style>

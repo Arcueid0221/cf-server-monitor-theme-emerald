@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Arc, COBEOptions, Globe, Marker } from 'cobe'
 import type { ComponentPublicInstance } from 'vue'
+import type { UnfoldOrigin, UnfoldView } from '@/components/NodeEarthUnfold.vue'
 import type { NodeData } from '@/stores/nodes'
 import { Icon } from '@iconify/vue'
 import {
@@ -10,7 +11,7 @@ import {
   useRafFn,
 } from '@vueuse/core'
 import createGlobe from 'cobe'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { useNodesStore } from '@/stores/nodes'
 import { getApiAssetUrl } from '@/utils/api'
@@ -20,6 +21,9 @@ import { formatBytesPerSecondSplit } from '@/utils/helper'
 const props = defineProps<{
   nodes?: NodeData[]
 }>()
+
+// 摊开成平面地图的组件（含 d3-geo）只在第一次点击时才加载
+const NodeEarthUnfold = defineAsyncComponent(() => import('@/components/NodeEarthUnfold.vue'))
 
 const appStore = useAppStore()
 const nodesStore = useNodesStore()
@@ -53,8 +57,10 @@ let lastPointerX = 0
 let lastPointerY = 0
 let staticRedrawUntil = 0
 
-// 全屏展开：点地球（没拖动）或右上角按钮打开，Esc／点空白／关闭按钮退出
-const isFullscreen = ref(false)
+// 点地球（没拖动）或右上角按钮：摊开成平面地图
+const isUnfoldOpen = ref(false)
+/** 摊开层第一帧画好后才隐藏小地球，避免闪一下空白 */
+const hideSmallGlobe = ref(false)
 const CLICK_MOVE_TOLERANCE_PX = 5
 const CLICK_MAX_DURATION_MS = 400
 let pointerDownX = 0
@@ -461,39 +467,36 @@ watch(shouldRender, () => {
   syncRafState()
 })
 
-function openFullscreen() {
-  isFullscreen.value = true
-}
-
-function closeFullscreen() {
-  isFullscreen.value = false
-}
-
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && isFullscreen.value)
-    closeFullscreen()
-}
-
-// 画布在普通位置和 body 之间搬动后，cobe 的 wrapper 和尺寸都要重来，直接重建最稳
-watch(isFullscreen, async (open) => {
-  if (typeof document !== 'undefined') {
-    document.body.style.overflow = open ? 'hidden' : ''
-    if (open)
-      document.addEventListener('keydown', onKeydown)
-    else
-      document.removeEventListener('keydown', onKeydown)
+/** 小地球在屏幕上的圆心和半径（cobe 的球半径是画布半宽的 GLOBE_RADIUS 倍） */
+function getUnfoldOrigin(): UnfoldOrigin {
+  const rect = containerRef.value?.getBoundingClientRect()
+  if (!rect)
+    return { cx: window.innerWidth / 2, cy: window.innerHeight / 2, r: 200 }
+  return {
+    cx: rect.left + rect.width / 2,
+    cy: rect.top + rect.height / 2,
+    r: GLOBE_RADIUS * GLOBE_SCALE * Math.min(rect.width, rect.height) / 2,
   }
-  await nextTick()
-  rebuildGlobe()
-})
+}
 
-onBeforeUnmount(() => {
-  if (typeof document !== 'undefined') {
-    document.removeEventListener('keydown', onKeydown)
-    if (isFullscreen.value)
-      document.body.style.overflow = ''
+/** 小地球此刻正对屏幕的经纬度，由 coordToGlobePoint 的坐标约定反推 */
+function getUnfoldView(): UnfoldView {
+  return {
+    lon: Math.atan2(-Math.cos(phi), -Math.sin(phi)) * 180 / Math.PI,
+    lat: theta * 180 / Math.PI,
   }
-})
+}
+
+function openUnfold() {
+  if (isUnfoldOpen.value)
+    return
+  isUnfoldOpen.value = true
+}
+
+function onUnfoldClosed() {
+  hideSmallGlobe.value = false
+  isUnfoldOpen.value = false
+}
 
 function onPointerDown(e: PointerEvent) {
   isPointerDown = true
@@ -522,13 +525,15 @@ function onPointerUp(e: PointerEvent) {
   if (target.hasPointerCapture(e.pointerId))
     target.releasePointerCapture(e.pointerId)
   syncRafState()
-  // 没怎么动、按得不久就算"点击"：首页上点地球展开全屏（拖动旋转不触发）
+  // 没怎么动、按得不久就算点击（拖动旋转不触发）
   const moved = Math.hypot(e.clientX - pointerDownX, e.clientY - pointerDownY)
-  const isClick = e.type === 'pointerup'
+  if (
+    e.type === 'pointerup'
     && moved <= CLICK_MOVE_TOLERANCE_PX
     && performance.now() - pointerDownAt <= CLICK_MAX_DURATION_MS
-  if (isClick && !isFullscreen.value)
-    openFullscreen()
+  ) {
+    openUnfold()
+  }
 }
 
 const totalServers = computed(() => displayNodes.value.length)
@@ -546,78 +551,74 @@ function formatRate(bytesPerSec: number): string {
 </script>
 
 <template>
-  <!-- 外层始终留在原位占住格子；全屏时里面的地球搬到 body 下（外层有 transform，fixed 会失效） -->
-  <div class="relative aspect-square w-full max-w-md mx-auto -translate-y-6 md:-translate-y-12">
-    <Teleport to="body" :disabled="!isFullscreen">
+  <div
+    ref="containerRef"
+    class="relative aspect-square w-full max-w-md mx-auto -translate-y-6 md:-translate-y-12 transition-opacity duration-150"
+    :class="hideSmallGlobe ? 'opacity-0' : ''"
+  >
+    <canvas
+      ref="canvasRef"
+      class="earth-globe-canvas absolute inset-0 w-full h-full select-none touch-none cursor-grab active:cursor-grabbing"
+      @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp"
+    />
+
+    <template v-for="cluster in regionClusters" :key="cluster.key">
       <div
-        :class="isFullscreen
-          ? 'fixed inset-0 z-50 flex items-center justify-center bg-background/85 backdrop-blur-md'
-          : 'absolute inset-0'"
-        @click.self="closeFullscreen"
+        :ref="bindClusterOverlayRef(cluster.key)"
+        class="absolute -top-7.5 left-0 pointer-events-none rounded backdrop-blur transition-[opacity,filter] duration-500"
       >
-        <div
-          ref="containerRef"
-          class="relative aspect-square"
-          :class="isFullscreen ? 'w-[min(92vw,92vh)] max-w-[960px]' : 'w-full h-full'"
+        <img
+          v-if="cluster.code"
+          :src="getApiAssetUrl(`flags/${cluster.code.toLowerCase()}.svg`)" :alt="cluster.code"
+          class="size-4 block absolute -bottom-2 -left-2 z-1 drop-shadow-[0_0_2px_rgba(0,0,0,0.1)]"
         >
-          <canvas
-            ref="canvasRef"
-            class="earth-globe-canvas absolute inset-0 w-full h-full select-none touch-none cursor-grab active:cursor-grabbing"
-            @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp"
-          />
+        <div class="relative z-2 bg-background/60 rounded py-0.5 px-1 text-xs zoom-80 items-start justify-center text-nowrap">
+          <div class="text-green-600 flex flex-row items-center gap-0.5">
+            <Icon icon="tabler:chevron-up" width="12" height="12" /> {{ formatRate(rateFor(cluster.key).up) }}
+          </div>
+          <div class="text-blue-600 flex flex-row items-center gap-0.5">
+            <Icon icon="tabler:chevron-down" width="12" height="12" /> {{ formatRate(rateFor(cluster.key).down) }}
+          </div>
+        </div>
+      </div>
+    </template>
 
-          <template v-for="cluster in regionClusters" :key="cluster.key">
-            <div
-              :ref="bindClusterOverlayRef(cluster.key)"
-              class="absolute -top-7.5 left-0 pointer-events-none rounded backdrop-blur transition-[opacity,filter] duration-500"
-            >
-              <img
-                v-if="cluster.code"
-                :src="getApiAssetUrl(`flags/${cluster.code.toLowerCase()}.svg`)" :alt="cluster.code"
-                class="size-4 block absolute -bottom-2 -left-2 z-1 drop-shadow-[0_0_2px_rgba(0,0,0,0.1)]"
-              >
-              <div class="relative z-2 bg-background/60 rounded py-0.5 px-1 text-xs zoom-80 items-start justify-center text-nowrap">
-                <div class="text-green-600 flex flex-row items-center gap-0.5">
-                  <Icon icon="tabler:chevron-up" width="12" height="12" /> {{ formatRate(rateFor(cluster.key).up) }}
-                </div>
-                <div class="text-blue-600 flex flex-row items-center gap-0.5">
-                  <Icon icon="tabler:chevron-down" width="12" height="12" /> {{ formatRate(rateFor(cluster.key).down) }}
-                </div>
-              </div>
-            </div>
-          </template>
-
-          <div
-            v-if="totalServers > 0"
-            :class="isFullscreen ? 'top-2' : 'top-6 md:top-12'"
-            class="absolute left-0 text-[10px] text-muted-foreground pointer-events-none flex gap-2 items-center backdrop-blur-lg bg-background/60 rounded px-2 py-0.5"
-          >
-            <div v-if="onlineServers > 0" class="flex items-center gap-1">
-              <span class="inline-block size-1.5 rounded-full bg-green-600 animate-pulse" />
-              <span class="text-green-600">{{ onlineServers }}</span>
-            </div>
-            <div v-if="offlineServers > 0" class="flex items-center gap-1">
-              <span class="inline-block size-1.5 rounded-full bg-yellow-600 animate-pulse" />
-              <span class="text-yellow-600">{{ offlineServers }}</span>
-            </div>
-            <!-- <div v-if="totalServers > 0" class="flex items-center gap-1">
+    <div
+      v-if="totalServers > 0"
+      class="absolute top-6 md:top-12 left-0 text-[10px] text-muted-foreground pointer-events-none flex gap-2 items-center backdrop-blur-lg bg-background/60 rounded px-2 py-0.5"
+    >
+      <div v-if="onlineServers > 0" class="flex items-center gap-1">
+        <span class="inline-block size-1.5 rounded-full bg-green-600 animate-pulse" />
+        <span class="text-green-600">{{ onlineServers }}</span>
+      </div>
+      <div v-if="offlineServers > 0" class="flex items-center gap-1">
+        <span class="inline-block size-1.5 rounded-full bg-yellow-600 animate-pulse" />
+        <span class="text-yellow-600">{{ offlineServers }}</span>
+      </div>
+      <!-- <div v-if="totalServers > 0" class="flex items-center gap-1">
         <span class="inline-block size-1.5 rounded-full bg-blue-600 animate-pulse" />
         <span class="text-blue-600">{{ totalServers }}</span>
       </div> -->
-          </div>
+    </div>
 
-          <button
-            type="button"
-            :class="isFullscreen ? 'top-2' : 'top-6 md:top-12'"
-            class="earth-fullscreen-btn absolute right-0 z-10 backdrop-blur-lg bg-background/60 text-muted-foreground"
-            :aria-label="isFullscreen ? '退出全屏' : '全屏查看地球'"
-            :title="isFullscreen ? '退出全屏（Esc）' : '全屏查看地球（也可直接点地球）'"
-            @click="isFullscreen ? closeFullscreen() : openFullscreen()"
-          >
-            <Icon :icon="isFullscreen ? 'tabler:x' : 'tabler:arrows-maximize'" width="14" height="14" />
-          </button>
-        </div>
-      </div>
+    <button
+      type="button"
+      class="absolute top-6 md:top-12 right-0 z-10 inline-flex items-center justify-center size-6 rounded backdrop-blur-lg bg-background/60 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+      aria-label="摊开成平面地图" title="摊开成平面地图（也可直接点地球）"
+      @click="openUnfold"
+    >
+      <Icon icon="tabler:map-2" width="14" height="14" />
+    </button>
+
+    <Teleport to="body">
+      <NodeEarthUnfold
+        v-if="isUnfoldOpen"
+        :nodes="nodesStore.nodes"
+        :get-origin="getUnfoldOrigin"
+        :get-view="getUnfoldView"
+        @ready="hideSmallGlobe = true"
+        @closed="onUnfoldClosed"
+      />
     </Teleport>
   </div>
 </template>
@@ -625,20 +626,5 @@ function formatRate(bytesPerSec: number): string {
 <style scoped>
 .earth-globe-canvas {
   contain: layout paint;
-}
-
-.earth-fullscreen-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: 0.25rem;
-  cursor: pointer;
-  transition: color 150ms;
-}
-
-.earth-fullscreen-btn:hover {
-  color: var(--foreground, currentColor);
 }
 </style>

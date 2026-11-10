@@ -299,6 +299,8 @@ export interface ServerSource {
   serverId: string
   /** 这台服务器自己的延迟节点显示名 */
   pingNames?: Partial<Record<'ct' | 'cu' | 'cm' | 'bd' | 'node_1' | 'node_2' | 'node_3' | 'node_4', string>>
+  /** 这台服务器当前每个延迟节点是否停用（后台设成 0）；没见过该节点的数据时没有对应的键 */
+  pingDisabled?: Partial<Record<'ct' | 'cu' | 'cm' | 'bd' | 'node_1' | 'node_2' | 'node_3' | 'node_4', boolean>>
 }
 
 interface HistoryRow extends Record<string, unknown> {
@@ -1134,7 +1136,13 @@ export function adaptServer(server: CfServer, apiIndex: number): AdaptedServer {
   const pingNames = server.ping_names === undefined
     ? sourceRegistry.get(uuid)?.pingNames
     : parseOwnPingNames(server.ping_names)
-  sourceRegistry.set(uuid, { apiIndex, baseUrl, serverId: server.id, pingNames })
+  // 节点停用时探针上报 false。只更新这次数据里带了的节点，没带的沿用上次的判断。
+  const pingDisabled = { ...sourceRegistry.get(uuid)?.pingDisabled }
+  for (const task of PING_TASKS) {
+    if (task.latencyField in wire)
+      pingDisabled[task.key] = wire[task.latencyField] === false
+  }
+  sourceRegistry.set(uuid, { apiIndex, baseUrl, serverId: server.id, pingNames, pingDisabled })
 
   const billing = adaptServerBilling(server)
   const updatedAt = timestamp(wire.report_timestamp ?? server.last_updated ?? server.timestamp, 0)
@@ -1302,9 +1310,34 @@ export async function fetchPingHistory(uuid: string, hours = 1): Promise<{
   const losses = new Map<number, number[]>()
   const availableTasks = new Set<number>()
 
+  // 后台把某个节点设成 0（不测）之后，探针上报的值是 false。时间范围里更早的行还留着它以前的数据，
+  // 照画的话图上会多出一堆已经停掉的线路。所以停用的节点整条不画：
+  // 先看这台服务器当前的实时状态；还没拿到实时状态时，以历史里最新一行为准（长时间范围是分桶聚合的，会晚几分钟）。
+  let latestRow: HistoryRow | undefined
+  for (const row of rows ?? []) {
+    if (!latestRow || timestamp(row.timestamp) >= timestamp(latestRow.timestamp))
+      latestRow = row
+  }
+  const disabledTasks = new Set<number>()
+  if (latestRow) {
+    for (const task of PING_TASKS) {
+      if (latestRow[task.latencyField] === false && latestRow[task.lossField] === false)
+        disabledTasks.add(task.id)
+    }
+  }
+  for (const task of PING_TASKS) {
+    const live = source.pingDisabled?.[task.key]
+    if (live === true)
+      disabledTasks.add(task.id)
+    else if (live === false)
+      disabledTasks.delete(task.id)
+  }
+
   for (const row of rows ?? []) {
     const time = new Date(timestamp(row.timestamp)).toISOString()
     for (const task of PING_TASKS) {
+      if (disabledTasks.has(task.id))
+        continue
       const latencyValue = row[task.latencyField]
       const lossRaw = row[task.lossField]
       const hasLatency = isPingFieldPresent(latencyValue)

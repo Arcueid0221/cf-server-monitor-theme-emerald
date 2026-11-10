@@ -183,6 +183,8 @@ export interface CfServer {
   loss_node_2?: number | string | null
   loss_node_3?: number | string | null
   loss_node_4?: number | string | null
+  /** 这台服务器自己的延迟节点显示名：JSON 对象字符串（如 {"ct":"Panstar-LA"}），没设置时为空串或缺失 */
+  ping_names?: string | Record<string, unknown> | null
   /** 一小时延迟窗口（旧→新，桶数与区间由 /api/config 的 latency_window 决定），仅 /api/servers 列表返回 */
   ping?: LatencyWindowPoint[]
   loss?: LatencyWindowPoint[]
@@ -295,6 +297,8 @@ export interface ServerSource {
   apiIndex: number
   baseUrl: string
   serverId: string
+  /** 这台服务器自己的延迟节点显示名 */
+  pingNames?: Partial<Record<'ct' | 'cu' | 'cm' | 'bd' | 'node_1' | 'node_2' | 'node_3' | 'node_4', string>>
 }
 
 interface HistoryRow extends Record<string, unknown> {
@@ -365,6 +369,39 @@ function applyCustomPingNames(config?: SiteConfig): void {
     node_3: config.node_3_name?.trim() || DEFAULT_PING_TASK_NAMES.node_3,
     node_4: config.node_4_name?.trim() || DEFAULT_PING_TASK_NAMES.node_4,
   }
+}
+
+const PING_TASK_KEYS_ALL = Object.keys(DEFAULT_PING_TASK_NAMES) as PingTaskKey[]
+
+/** 解析服务器自己的延迟节点显示名；解析不了或没设置时返回空对象 */
+function parseOwnPingNames(raw: unknown): Partial<Record<PingTaskKey, string>> {
+  let source = raw
+  if (typeof source === 'string') {
+    if (!source.trim())
+      return {}
+    try {
+      source = JSON.parse(source)
+    }
+    catch {
+      return {}
+    }
+  }
+  if (!source || typeof source !== 'object' || Array.isArray(source))
+    return {}
+
+  const names: Partial<Record<PingTaskKey, string>> = {}
+  for (const key of PING_TASK_KEYS_ALL) {
+    const value = (source as Record<string, unknown>)[key]
+    const name = typeof value === 'string' ? value.trim() : ''
+    if (name)
+      names[key] = name
+  }
+  return names
+}
+
+/** 某台服务器某个延迟节点的显示名：这台自己的优先，没写再用全站名字 */
+function pingTaskNameFor(uuid: string, key: PingTaskKey): string {
+  return sourceRegistry.get(uuid)?.pingNames?.[key] || pingTaskNames[key]
 }
 
 function enabled(value: unknown): boolean {
@@ -1093,7 +1130,11 @@ export function adaptServer(server: CfServer, apiIndex: number): AdaptedServer {
   const wire = server as unknown as Record<string, unknown>
   const uuid = getDisplayUuid(apiIndex, server.id)
   const baseUrl = getApiBases()[apiIndex] ?? ''
-  sourceRegistry.set(uuid, { apiIndex, baseUrl, serverId: server.id })
+  // 实时推送来的数据不带 ping_names：缺这个字段时沿用上次列表接口给的名字，别清空。
+  const pingNames = server.ping_names === undefined
+    ? sourceRegistry.get(uuid)?.pingNames
+    : parseOwnPingNames(server.ping_names)
+  sourceRegistry.set(uuid, { apiIndex, baseUrl, serverId: server.id, pingNames })
 
   const billing = adaptServerBilling(server)
   const updatedAt = timestamp(wire.report_timestamp ?? server.last_updated ?? server.timestamp, 0)
@@ -1105,7 +1146,7 @@ export function adaptServer(server: CfServer, apiIndex: number): AdaptedServer {
   for (const task of PING_TASKS) {
     if (pingFieldPresent(server, task.latencyField) || pingFieldPresent(server, task.lossField)) {
       ping[task.key] = pingEntry(
-        pingTaskNames[task.key],
+        pingTaskNameFor(uuid, task.key),
         server[task.latencyField],
         server[task.lossField],
       )
@@ -1295,7 +1336,7 @@ export async function fetchPingHistory(uuid: string, hours = 1): Promise<{
     tasks: PING_TASKS.filter(task => availableTasks.has(task.id)).map(task => ({
       id: task.id,
       key: task.key,
-      name: pingTaskNames[task.key],
+      name: pingTaskNameFor(uuid, task.key),
       interval: 60,
       loss: (losses.get(task.id) ?? []).reduce((sum, value) => sum + value, 0) / Math.max(1, losses.get(task.id)?.length ?? 0),
     })),
